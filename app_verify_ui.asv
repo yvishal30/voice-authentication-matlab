@@ -1,0 +1,135 @@
+function app_verify_ui()
+% Voice verification UI with lamp indicator & audio playback
+% Verification happens after clicking 'Verify' button
+
+netMat = 'E:\VProject\MATLAB\VoiceAuthProject\models\trained_speaker_cnn_embed_final.mat';
+enrollmentMat = 'E:\VProject\MATLAB\VoiceAuthProject\models\enrollment.mat';
+thresholdMat = 'E:\VProject\MATLAB\VoiceAuthProject\results\threshold.mat';
+
+%% Load network + preprocessing
+if ~exist(netMat,'file'), error('Net file not found: %s', netMat); end
+S = load(netMat,'net','maxLen','mu','sigma');
+if ~isfield(S,'net'), error('Net missing in %s', netMat); end
+net = S.net; maxLen = S.maxLen; mu = S.mu; sigma = S.sigma;
+
+%% Load enrollment
+if ~exist(enrollmentMat,'file'), error('Enrollment file not found: %s', enrollmentMat); end
+E = load(enrollmentMat,'proto'); proto = E.proto;
+
+%% Load threshold
+T = load('threshold.mat','th'); 
+th = T.th + 0.4;  % add margin
+%% Create UI
+f = uifigure('Name','Voice Verification','Position',[200 200 600 400]);
+uilabel(f,'Text','Record (3s) or Upload audio to verify:','Position',[20 360 550 20],'FontWeight','bold');
+
+btnRecord = uibutton(f,'push','Text','Record 3s','Position',[20 320 120 35]);
+btnUpload = uibutton(f,'push','Text','Upload File','Position',[160 320 120 35]);
+btnPlay   = uibutton(f,'push','Text','Play Audio','Position',[300 320 100 35]);
+btnVerify = uibutton(f,'push','Text','Verify','Position',[420 320 100 35]);
+
+lblResult = uilabel(f,'Position',[140 240 400 35],'Text','Result: --','FontSize',14,'FontWeight','bold');
+lamp = uilamp(f,'Position',[20 190 30 30]); lamp.Color = [0.8 0 0];
+
+ax = uiaxes(f,'Position',[20 20 550 150]);
+xlabel(ax,'Score'); xlim(ax,[0 1]); title(ax,'Highest cosine similarity among enrolled speakers');
+
+%% Temp storage
+temp.audio = [];
+temp.fs = 16000;
+temp.net = net;
+temp.proto = proto;
+temp.th = th;
+temp.maxLen = maxLen;
+temp.mu = mu;
+temp.sigma = sigma;
+guidata(f,temp);
+
+%% Callbacks
+btnRecord.ButtonPushedFcn = @(~,~) onRecord();
+btnUpload.ButtonPushedFcn = @(~,~) onUpload();
+btnPlay.ButtonPushedFcn   = @(~,~) onPlay();
+btnVerify.ButtonPushedFcn = @(~,~) autoVerify();
+
+%% ---- helper functions ----
+function onRecord()
+    temp = guidata(f);
+    rec = audiorecorder(temp.fs,16,1);
+    disp('Recording 3 seconds...');
+    recordblocking(rec,3);
+    y = getaudiodata(rec,'double');
+    temp.audio = y;
+    guidata(f,temp);
+    disp('Recording done. Click "Verify" to check.');
+end
+
+function onUpload()
+    [file, path] = uigetfile({'*.wav;*.mp3','Audio Files'});
+    if isequal(file,0), return; end
+    fullfilePath = fullfile(path,file);
+    [y, fs] = audioread(fullfilePath);
+    if size(y,2) > 1, y = mean(y,2); end
+    if fs ~= 16000, y = resample(y,16000,fs); end
+    temp = guidata(f);
+    temp.audio = y;
+    guidata(f,temp);
+    disp('File loaded. Click "Verify" to check.');
+end
+
+function onPlay()
+    temp = guidata(f);
+    if isempty(temp.audio)
+        disp('No audio to play.'); return;
+    end
+    sound(temp.audio, temp.fs);
+end
+
+function autoVerify()
+    temp = guidata(f);
+    if isempty(temp.audio)
+        uialert(f,'No audio loaded. Please record or upload first.','Warning');
+        return;
+    end
+
+    % pad/trim to 3s
+    L = temp.fs*3;
+    y = temp.audio(:);
+    if numel(y) < L
+        y = [y; zeros(L-numel(y),1)];
+    else
+        y = y(1:L);
+    end
+
+    % Get embedding (MFCC + CNN)
+    emb = getEmbedding(y, temp.fs);  % Uses memory-efficient single-call embedding
+
+    speakers = fieldnames(temp.proto);
+    scores = zeros(numel(speakers),1);
+    for k = 1:numel(speakers)
+        protoEmb = temp.proto.(speakers{k}); % 1 x D
+        scores(k) = dot(emb, protoEmb) / (norm(emb)*norm(protoEmb) + eps);
+    end
+
+    [maxScore, idx] = max(scores);
+    if isempty(speakers)
+        bestSpeaker = 'NO ENROLLMENT';
+    else
+        bestSpeaker = speakers{idx};
+    end
+
+    % Update plot (single point)
+    cla(ax); hold(ax,'on');
+    plot(ax, maxScore, 0.5, 's','MarkerSize',12,'MarkerFaceColor','b');
+    hold(ax,'off');
+
+    % Display result
+    if maxScore >= temp.th
+        lblResult.Text = sprintf('Result: VERIFIED as %s (score=%.3f >= %.3f)', bestSpeaker, maxScore, temp.th);
+        lblResult.FontColor = [0 0.6 0]; lamp.Color = [0 0.6 0];
+    else
+        lblResult.Text = sprintf('Result: NOT VERIFIED (highest score=%.3f < %.3f)', maxScore, temp.th);
+        lblResult.FontColor = [0.8 0 0]; lamp.Color = [0.8 0 0];
+    end
+end
+
+end
